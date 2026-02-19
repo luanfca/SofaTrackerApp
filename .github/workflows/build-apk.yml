@@ -1,0 +1,49 @@
+name: Gerar APK Android
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar Repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar Dependências (NPM)
+        run: npm install
+
+      - name: Fazer o Build do React (Vite)
+        run: npm run build
+
+      - name: Sincronizar Capacitor
+        run: npx cap sync android
+
+      - name: Configurar Java JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Dar permissão de execução ao Gradle
+        run: chmod +x android/gradlew
+
+      - name: Fazer o Build do APK
+        working-directory: ./android
+        run: ./gradlew assembleDebug
+
+      - name: Disponibilizar APK para Download
+        uses: actions/upload-artifact@v4
+        with:
+          name: SofaTracker-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk

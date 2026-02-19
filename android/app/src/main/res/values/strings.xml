@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SofaTracker</string>
+    <string name="title_activity_main">SofaTracker</string>
+    <string name="package_name">com.luan.sofatracker</string>
+    <string name="custom_url_scheme">com.luan.sofatracker</string>
+</resources>
