@@ -10,7 +10,7 @@ const getPlayerImageUrl = (playerId) => {
   return `${API_BASE}/player-image/${playerId || 0}`;
 };
 
-// --- COMPONENTE DE IMAGEM SEGURO (Evita erros de CSP e Tela Branca) ---
+// --- COMPONENTE DE IMAGEM SEGURO ---
 const ImageWithFallback = ({ src, fallbackName, alt, className }) => {
   const [imgSrc, setImgSrc] = useState(src);
 
@@ -98,7 +98,22 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [isDemoMode, setIsDemoMode] = useState(false);
 
-  const [savedPlayers, setSavedPlayers] = useState([]);
+  // 1. PERSISTÊNCIA DE DADOS (Impede de perder jogadores ao fechar o app)
+  const [savedPlayers, setSavedPlayers] = useState(() => {
+    try {
+      const localData = localStorage.getItem('@sofatracker_saved_players');
+      return localData ? JSON.parse(localData) : [];
+    } catch (error) {
+      console.error("Erro ao carregar dados do disco:", error);
+      return [];
+    }
+  });
+
+  // Salva no disco sempre que a lista mudar
+  useEffect(() => {
+    localStorage.setItem('@sofatracker_saved_players', JSON.stringify(savedPlayers));
+  }, [savedPlayers]);
+
   const [trackedStats, setTrackedStats] = useState({
     tackles: false, fouls: false, foulsDrawn: false, shotsTotal: false, shotsOnTarget: false
   });
@@ -106,38 +121,45 @@ export default function App() {
   const [playerStats, setPlayerStats] = useState(null);
   const [notifications, setNotifications] = useState([]);
 
-  // INICIALIZAÇÃO NATIVA (Notificações, Tela Ligada, Segundo Plano)
+  // 2. CONFIGURAÇÃO NATIVA BLINDADA (Fica Ativo em Background)
   useEffect(() => {
     const initNativeConfig = async () => {
-      // 1. Pede permissão para Notificações Nativas no Android
+      // Pede permissão para Notificações Nativas
       try {
         await LocalNotifications.requestPermissions();
       } catch (e) {
-        console.log('Permissão de notificação falhou ou não suportada no ambiente.', e);
+        console.log('Permissão de notificação falhou ou não suportada.', e);
       }
 
-      // 2. Mantém a tela ligada se o app estiver em primeiro plano
+      // Mantém a tela ligada se o app estiver aberto em primeiro plano
       try {
         await KeepAwake.keepAwake();
       } catch (e) {
-        console.log('KeepAwake não suportado no ambiente.', e);
+        console.log('KeepAwake não suportado.', e);
       }
 
-      // 3. Força o app a não dormir em segundo plano (Background Mode)
+      // Configuração Extrema de Background Mode
       if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
         const bgMode = window.cordova.plugins.backgroundMode;
+        
         bgMode.enable();
         bgMode.setDefaults({
-            title: 'SofaTracker Ativo',
-            text: 'A monitorizar estatísticas dos jogadores...',
+            title: '🟢 SofaTracker Ativo',
+            text: 'A receber dados do jogo em tempo real...',
             icon: 'icon', 
             color: '#10b981', 
             hidden: false,
+            sticky: true, // Torna a notificação inamovível
             silent: true
         });
         
+        // Pede ao utilizador para ignorar a otimização de bateria (Fundamental no Android 12+)
+        if (typeof bgMode.disableBatteryOptimizations === 'function') {
+          bgMode.disableBatteryOptimizations();
+        }
+
         bgMode.on('activate', function() {
-           bgMode.disableWebViewOptimizations(); 
+           bgMode.disableWebViewOptimizations(); // Força o JavaScript (setInterval) a continuar correndo
         });
       }
     };
@@ -145,7 +167,7 @@ export default function App() {
     initNativeConfig();
   }, []);
 
-  // Refs de sincronização
+  // Refs de sincronização para o setInterval
   const viewRef = useRef(view);
   const savedPlayersRef = useRef(savedPlayers);
   const playerStatsRef = useRef(playerStats);
@@ -278,16 +300,16 @@ export default function App() {
     setView('tracker');
   };
 
-  // FUNÇÃO DE NOTIFICAÇÃO MISTA (Interna + Nativa do Celular)
-  const addNotification = async (title, message, type = 'info', iconUrl = null) => {
-    // 1. Mostra o balãozinho dentro do app
+  // 3. FUNÇÃO DE NOTIFICAÇÃO NATIVA
+  const addNotification = async (title, message, type = 'info') => {
+    // Mostra o balãozinho visual dentro do app
     const id = Date.now() + Math.random();
     setNotifications(prev => [{ id, title, message, type }, ...prev]);
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 5000);
 
-    // 2. Dispara a Notificação Nativa do Android
+    // Dispara a Notificação Nativa Vibratória do Android
     try {
       await LocalNotifications.schedule({
         notifications: [
@@ -295,7 +317,7 @@ export default function App() {
             title: title,
             body: message,
             id: Math.floor(Math.random() * 1000000), 
-            schedule: { at: new Date(Date.now() + 1000) }, // Daqui a 1 segundo para o sistema processar
+            schedule: { at: new Date(Date.now() + 1000) }, // Atraso de 1s ajuda o sistema a processar em background
             sound: null,
             attachments: null,
             actionTypeId: '',
@@ -303,11 +325,17 @@ export default function App() {
           }
         ]
       });
+      
+      // Se estiver em background, força a tela a acordar (opcional)
+      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
+         window.cordova.plugins.backgroundMode.wakeUp();
+      }
     } catch (e) {
       console.warn('Ambiente não suporta notificações nativas:', e);
     }
   };
 
+  // LOOP DE VERIFICAÇÃO DE ESTATÍSTICAS
   useEffect(() => {
     const pollStats = async () => {
       const targets = [...savedPlayersRef.current];
@@ -526,9 +554,8 @@ export default function App() {
 
           <div className="flex items-center justify-end shrink-0 gap-1 sm:gap-2">
             
-            {/* NOVO BOTÃO DE TESTE DE NOTIFICAÇÃO NATIVA */}
             <button 
-              onClick={() => addNotification('Teste Recebido! 🛡️', 'A notificação nativa está a funcionar perfeitamente.', 'success')}
+              onClick={() => addNotification('Teste Recebido! 🛡️', 'A notificação nativa está a funcionar em segundo plano.', 'success')}
               className="flex text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 px-3 py-1.5 rounded-full border border-emerald-500/30 items-center gap-1.5 transition-colors font-bold shadow-[0_0_10px_rgba(16,185,129,0.2)]"
               title="Testar Notificação Nativa no Celular"
             >
@@ -860,7 +887,7 @@ export default function App() {
         )}
       </main>
 
-      {/* BALÕES DE NOTIFICAÇÃO DENTRO DO APP */}
+      {/* BALÕES VISUAIS DENTRO DO APP */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none w-full max-w-sm px-4">
         {notifications.map(notif => (
           <div key={notif.id} className="animate-in slide-in-from-right-8 fade-in duration-300 pointer-events-auto flex items-start gap-3 p-4 bg-slate-800 border-l-4 border-emerald-500 rounded-xl shadow-2xl shadow-black/50" style={{ borderLeftColor: notif.type === 'success' ? '#10b981' : notif.type === 'warning' ? '#f59e0b' : notif.type === 'danger' ? '#ef4444' : '#3b82f6' }}>
