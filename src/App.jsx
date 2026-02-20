@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Activity, Bell, BellRing, ChevronLeft, Crosshair, Shield, ShieldAlert, Target, Zap, Loader2, Star, Users, Trash2, LayoutDashboard, Trophy } from 'lucide-react';
+import { LocalNotifications } from '@capacitor/local-notifications';
+import { KeepAwake } from '@capacitor-community/keep-awake';
 
 // --- CONFIGURAÇÕES E API ---
 const API_BASE = 'https://backend-sofa-production.up.railway.app';
@@ -18,7 +20,6 @@ const ImageWithFallback = ({ src, fallbackName, alt, className }) => {
 
   const handleError = () => {
     const fallback = `https://ui-avatars.com/api/?name=${encodeURIComponent(fallbackName || '?')}&background=1e293b&color=10b981&font-size=0.4`;
-    // Previne loop infinito se a própria imagem de fallback falhar
     if (imgSrc !== fallback) {
       setImgSrc(fallback);
     }
@@ -104,35 +105,45 @@ export default function App() {
   
   const [playerStats, setPlayerStats] = useState(null);
   const [notifications, setNotifications] = useState([]);
-  const [sysNotificationAllowed, setSysNotificationAllowed] = useState(false);
 
+  // INICIALIZAÇÃO NATIVA (Notificações, Tela Ligada, Segundo Plano)
   useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      setSysNotificationAllowed(true);
-    }
-  }, []);
-
-  const requestSystemNotifications = async () => {
-    if (!('Notification' in window)) {
-      alert('O seu navegador não suporta notificações de sistema.');
-      return;
-    }
-    try {
-      const permission = await Notification.requestPermission();
-      setSysNotificationAllowed(permission === 'granted');
-      
-      if (permission === 'granted') {
-        new Notification('SofaTracker', { 
-          body: 'Notificações de sistema ativadas com sucesso!',
-          icon: 'https://cdn-icons-png.flaticon.com/512/1164/1164385.png'
-        });
-      } else {
-        alert('Permissão negada ou bloqueada pelo ambiente de Preview (iframe). Os alertas internos no canto do ecrã continuarão a funcionar normalmente!');
+    const initNativeConfig = async () => {
+      // 1. Pede permissão para Notificações Nativas no Android
+      try {
+        await LocalNotifications.requestPermissions();
+      } catch (e) {
+        console.log('Permissão de notificação falhou ou não suportada no ambiente.', e);
       }
-    } catch (e) {
-      alert('O ambiente de Preview bloqueou o pedido de Popups Nativos por segurança. Teste localmente ou use apenas os alertas internos.');
-    }
-  };
+
+      // 2. Mantém a tela ligada se o app estiver em primeiro plano
+      try {
+        await KeepAwake.keepAwake();
+      } catch (e) {
+        console.log('KeepAwake não suportado no ambiente.', e);
+      }
+
+      // 3. Força o app a não dormir em segundo plano (Background Mode)
+      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
+        const bgMode = window.cordova.plugins.backgroundMode;
+        bgMode.enable();
+        bgMode.setDefaults({
+            title: 'SofaTracker Ativo',
+            text: 'A monitorizar estatísticas dos jogadores...',
+            icon: 'icon', 
+            color: '#10b981', 
+            hidden: false,
+            silent: true
+        });
+        
+        bgMode.on('activate', function() {
+           bgMode.disableWebViewOptimizations(); 
+        });
+      }
+    };
+
+    initNativeConfig();
+  }, []);
 
   // Refs de sincronização
   const viewRef = useRef(view);
@@ -246,10 +257,10 @@ export default function App() {
     const isSaved = savedPlayers.some(sp => sp?.player?.id === selectedPlayer.id);
     if (isSaved) {
       setSavedPlayers(prev => prev.filter(sp => sp?.player?.id !== selectedPlayer.id));
-      addNotification('Removido', `${selectedPlayer.name} removido dos salvos.`, 'info', getPlayerImageUrl(selectedPlayer.id));
+      addNotification('Removido', `${selectedPlayer.name} removido dos salvos.`, 'info');
     } else {
       setSavedPlayers(prev => [...prev, { game: selectedGame, player: selectedPlayer, stats: playerStats, tracked: trackedStats }]);
-      addNotification('Salvo!', `${selectedPlayer.name} a ser monitorizado.`, 'success', getPlayerImageUrl(selectedPlayer.id));
+      addNotification('Salvo!', `${selectedPlayer.name} a ser monitorizado.`, 'success');
     }
   };
 
@@ -267,22 +278,33 @@ export default function App() {
     setView('tracker');
   };
 
-  const addNotification = (title, message, type = 'info', iconUrl = null) => {
+  // FUNÇÃO DE NOTIFICAÇÃO MISTA (Interna + Nativa do Celular)
+  const addNotification = async (title, message, type = 'info', iconUrl = null) => {
+    // 1. Mostra o balãozinho dentro do app
     const id = Date.now() + Math.random();
     setNotifications(prev => [{ id, title, message, type }, ...prev]);
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 5000);
 
-    if ('Notification' in window && Notification.permission === 'granted') {
-      try {
-        new Notification(title, {
-          body: message,
-          icon: iconUrl || 'https://cdn-icons-png.flaticon.com/512/1164/1164385.png'
-        });
-      } catch (e) {
-        console.warn('Erro ao disparar notificação de sistema:', e);
-      }
+    // 2. Dispara a Notificação Nativa do Android
+    try {
+      await LocalNotifications.schedule({
+        notifications: [
+          {
+            title: title,
+            body: message,
+            id: Math.floor(Math.random() * 1000000), 
+            schedule: { at: new Date(Date.now() + 1000) }, // Daqui a 1 segundo para o sistema processar
+            sound: null,
+            attachments: null,
+            actionTypeId: '',
+            extra: null
+          }
+        ]
+      });
+    } catch (e) {
+      console.warn('Ambiente não suporta notificações nativas:', e);
     }
   };
 
@@ -336,7 +358,7 @@ export default function App() {
           const checkStat = (key, label, iconType) => {
             if (tracked[key] && (newData[key] || 0) > (oldStats[key] || 0)) {
               const diff = (newData[key] || 0) - (oldStats[key] || 0);
-              addNotification(`${target.player.name}: ${label}!`, `+${diff} registado. Total: ${newData[key]}`, iconType, getPlayerImageUrl(target.player.id));
+              addNotification(`${target.player.name}: ${label}!`, `+${diff} registado. Total: ${newData[key]}`, iconType);
             }
           };
 
@@ -454,7 +476,6 @@ export default function App() {
       <header className="sticky top-0 z-20 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 p-2 sm:p-4 shadow-lg shadow-black/20">
         <div className="max-w-4xl mx-auto flex items-center justify-between gap-1 sm:gap-2">
           
-          {/* Logo & Voltar */}
           <div className="flex items-center gap-1 sm:gap-3 shrink-0">
             {(view === 'lineups' || view === 'tracker') && (
               <button 
@@ -478,7 +499,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Painel de Acesso Central */}
           <div className="flex bg-slate-950/80 p-1 rounded-xl border border-slate-700/50 shadow-inner">
             <button 
               onClick={() => setView('saved')}
@@ -504,33 +524,18 @@ export default function App() {
             </button>
           </div>
 
-          {/* Info Extra (Direita) */}
           <div className="flex items-center justify-end shrink-0 gap-1 sm:gap-2">
+            
+            {/* NOVO BOTÃO DE TESTE DE NOTIFICAÇÃO NATIVA */}
             <button 
-              onClick={() => addNotification('Golo do Pedro!', 'Lance simulado para teste de interface.', 'success', 'https://cdn-icons-png.flaticon.com/512/1164/1164385.png')}
-              className="flex md:hidden p-2 text-emerald-400 bg-emerald-500/10 rounded-full border border-emerald-500/20"
-              title="Testar Notificação"
+              onClick={() => addNotification('Teste Recebido! 🛡️', 'A notificação nativa está a funcionar perfeitamente.', 'success')}
+              className="flex text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 px-3 py-1.5 rounded-full border border-emerald-500/30 items-center gap-1.5 transition-colors font-bold shadow-[0_0_10px_rgba(16,185,129,0.2)]"
+              title="Testar Notificação Nativa no Celular"
             >
-              <BellRing size={14} />
+              <BellRing size={14} className="animate-pulse" /> 
+              <span className="hidden sm:inline">Alerta Nativo</span>
             </button>
 
-            <button 
-              onClick={() => addNotification('Golo do Pedro!', 'Lance simulado para teste de interface.', 'success', 'https://cdn-icons-png.flaticon.com/512/1164/1164385.png')}
-              className="hidden md:flex text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 px-3 py-1 rounded-full border border-emerald-500/30 items-center gap-1 transition-colors"
-              title="Testar como a notificação aparece no ecrã"
-            >
-              <BellRing size={12} /> Testar Alerta
-            </button>
-
-            {!sysNotificationAllowed && 'Notification' in window && (
-              <button 
-                onClick={requestSystemNotifications}
-                className="hidden lg:flex text-xs bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 px-3 py-1 rounded-full border border-indigo-500/30 items-center gap-1 transition-colors"
-                title="Ativar Popups do Sistema (Notificações fora do ecrã)"
-              >
-                <Bell size={12} /> Popups OS
-              </button>
-            )}
             {isDemoMode && (
               <span className="hidden sm:flex text-[10px] sm:text-xs bg-amber-500/20 text-amber-400 px-2 sm:px-3 py-1 rounded-full border border-amber-500/30 items-center gap-1">
                 <Activity size={10} sm:size={12} /> <span className="hidden md:inline">Demo Mode</span>
@@ -855,6 +860,7 @@ export default function App() {
         )}
       </main>
 
+      {/* BALÕES DE NOTIFICAÇÃO DENTRO DO APP */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none w-full max-w-sm px-4">
         {notifications.map(notif => (
           <div key={notif.id} className="animate-in slide-in-from-right-8 fade-in duration-300 pointer-events-auto flex items-start gap-3 p-4 bg-slate-800 border-l-4 border-emerald-500 rounded-xl shadow-2xl shadow-black/50" style={{ borderLeftColor: notif.type === 'success' ? '#10b981' : notif.type === 'warning' ? '#f59e0b' : notif.type === 'danger' ? '#ef4444' : '#3b82f6' }}>
