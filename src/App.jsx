@@ -6,6 +6,9 @@ import { KeepAwake } from '@capacitor-community/keep-awake';
 // --- CONFIGURAÇÕES E API ---
 const API_BASE = 'https://backend-sofa-production.up.railway.app';
 
+// Áudio Mudo em Base64 para forçar o Android a manter a WebView acordada
+const SILENT_AUDIO = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
 const getPlayerImageUrl = (playerId) => {
   return `${API_BASE}/player-image/${playerId || 0}`;
 };
@@ -104,7 +107,7 @@ export default function App() {
       const localData = localStorage.getItem('@sofatracker_saved_players');
       return localData ? JSON.parse(localData) : [];
     } catch (error) {
-      console.error("Erro ao carregar dados do disco:", error);
+      console.error("Erro ao carregar dados:", error);
       return [];
     }
   });
@@ -120,19 +123,26 @@ export default function App() {
   const [playerStats, setPlayerStats] = useState(null);
   const [notifications, setNotifications] = useState([]);
 
-  // VARIÁVEL CHAVE PARA ENERGIA
+  // Refs de áudio e estado
+  const audioRef = useRef(null);
   const isMonitoring = savedPlayers.length > 0;
 
-  // 2. CONFIGURAÇÃO NATIVA (Sem o plugin causador de crash)
+  // 2. INICIALIZAÇÃO DE ÁUDIO E NOTIFICAÇÕES
   useEffect(() => {
-    const initNativeConfig = async () => {
+    const initApp = async () => {
+      // Prepara o Player Mudo
+      const audio = new Audio(SILENT_AUDIO);
+      audio.loop = true;
+      audio.volume = 0.01;
+      audioRef.current = audio;
+
+      // Permissões Nativas
       try {
         await LocalNotifications.requestPermissions();
-        
         await LocalNotifications.createChannel({
           id: 'sofatracker_alerts',
-          name: 'Alertas de Jogadores',
-          description: 'Notificações importantes de lances',
+          name: 'Alertas de Lances',
+          description: 'Lances importantes em tempo real',
           importance: 5,
           visibility: 1,
           vibration: true,
@@ -141,52 +151,43 @@ export default function App() {
         console.log('Permissões nativas falharam.', e);
       }
     };
-    initNativeConfig();
+    initApp();
+
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
   }, []);
 
- // 2.1 GERENCIAMENTO DINÂMICO DE ENERGIA (O Retorno Seguro)
+  // 2.1 GERENCIAMENTO DINÂMICO DE ENERGIA (HACK DO ÁUDIO)
   useEffect(() => {
     const managePowerState = async () => {
       try {
         if (isMonitoring) {
-          await KeepAwake.keepAwake(); // Mantém a tela acesa quando em primeiro plano
+          await KeepAwake.keepAwake(); // Mantém a tela acesa em primeiro plano
+          
+          // Toca o áudio silencioso para enganar o Android 16
+          if (audioRef.current) {
+            audioRef.current.play().catch(e => console.log('Autoplay do áudio aguardando clique do usuário'));
+          }
         } else {
           await KeepAwake.allowSleep();
+          
+          // Pausa o áudio para o app poder dormir
+          if (audioRef.current) {
+            audioRef.current.pause();
+          }
         }
       } catch (e) {
-        console.log('KeepAwake error', e);
-      }
-
-      // O MOTOR VOLTA AQUI (Mas sem a função que causava o Crash)
-      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
-        const bgMode = window.cordova.plugins.backgroundMode;
-        
-        if (isMonitoring) {
-          // Liga o serviço de segundo plano (Isso cria aquela notificação fixa no celular)
-          if (!bgMode.isActive()) {
-            bgMode.enable();
-            bgMode.setDefaults({
-              title: '🟢 SofaTracker Ativo',
-              text: 'Buscando estatísticas em tempo real...',
-              icon: 'icon', 
-              color: '#10b981', 
-              hidden: false,
-              sticky: true // Torna a notificação fixa para o Android não matar
-            });
-          }
-        } else {
-          // Se não tem ninguém sendo monitorado, desliga tudo pra poupar bateria
-          if (bgMode.isActive()) {
-            bgMode.disable();
-          }
-        }
+        console.error('Erro de energia:', e);
       }
     };
 
     managePowerState();
   }, [isMonitoring]);
 
-  // Refs de sincronização
   const viewRef = useRef(view);
   const savedPlayersRef = useRef(savedPlayers);
   const playerStatsRef = useRef(playerStats);
@@ -295,6 +296,12 @@ export default function App() {
 
   const toggleSavePlayer = () => {
     if (!selectedPlayer) return;
+    
+    // Como foi uma interação do usuário, garantimos que o áudio pode tocar
+    if (audioRef.current && audioRef.current.paused) {
+      audioRef.current.play().catch(() => {});
+    }
+
     const isSaved = savedPlayers.some(sp => sp?.player?.id === selectedPlayer.id);
     if (isSaved) {
       setSavedPlayers(prev => prev.filter(sp => sp?.player?.id !== selectedPlayer.id));
@@ -305,15 +312,18 @@ export default function App() {
     }
   };
 
-  // ADIÇÃO AUTOMÁTICA AO CLICAR NA ESTATÍSTICA
   const toggleTrack = (statKey) => {
+    // Interação do usuário ativa o áudio
+    if (audioRef.current && audioRef.current.paused) {
+      audioRef.current.play().catch(() => {});
+    }
+
     const newTracked = { ...(trackedStats || {}), [statKey]: !(trackedStats || {})[statKey] };
     setTrackedStats(newTracked);
     
     const isSaved = savedPlayers.some(sp => sp?.player?.id === selectedPlayer?.id);
 
     if (!isSaved) {
-      // Se não estiver salvo, salva automaticamente
       setSavedPlayers(prev => [...prev, { 
         game: selectedGame, 
         player: selectedPlayer, 
@@ -322,7 +332,6 @@ export default function App() {
       }]);
       addNotification('Automático', `${selectedPlayer?.name} adicionado aos favoritos.`, 'success');
     } else {
-      // Se já estiver, apenas atualiza as estatísticas rastreadas
       setSavedPlayers(prev => prev.map(sp => {
         if (sp?.player?.id === selectedPlayer?.id) {
           return { ...sp, tracked: newTracked };
@@ -346,7 +355,7 @@ export default function App() {
     setView('tracker');
   };
 
-  // 3. FUNÇÃO DE NOTIFICAÇÃO NATIVA (Limpa de chamadas antigas)
+  // 3. FUNÇÃO DE NOTIFICAÇÃO NATIVA
   const addNotification = async (title, message, type = 'info') => {
     const id = Date.now() + Math.random();
     setNotifications(prev => [{ id, title, message, type }, ...prev]);
@@ -361,7 +370,7 @@ export default function App() {
             title: title,
             body: message,
             id: Math.floor(Math.random() * 1000000), 
-            schedule: { at: new Date(Date.now() + 1000) },
+            schedule: { at: new Date(Date.now() + 500) }, // Atraso leve
             channelId: 'sofatracker_alerts', 
             sound: null,
             attachments: null,
@@ -460,7 +469,6 @@ export default function App() {
 
     const intervalTime = isDemoModeRef.current ? 5000 : 15000;
     
-    // TRUQUE DO WEB WORKER PARA DRIBLAR A ECONOMIA DE BATERIA
     const workerCode = `
       let timer = null;
       self.onmessage = function(e) {
