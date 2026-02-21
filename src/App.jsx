@@ -120,22 +120,21 @@ export default function App() {
   const [playerStats, setPlayerStats] = useState(null);
   const [notifications, setNotifications] = useState([]);
 
-  // VARIÁVEL CHAVE PARA ENERGIA E BACKGROUND
+  // VARIÁVEL CHAVE PARA ENERGIA
   const isMonitoring = savedPlayers.length > 0;
 
-  // 2. CONFIGURAÇÃO NATIVA BLINDADA E CANAL DE NOTIFICAÇÃO
+  // 2. CONFIGURAÇÃO NATIVA (Sem o plugin causador de crash)
   useEffect(() => {
     const initNativeConfig = async () => {
       try {
         await LocalNotifications.requestPermissions();
         
-        // CRIA CANAL DE ALTA PRIORIDADE PARA ANDROID 8+ (ACORDA A TELA)
         await LocalNotifications.createChannel({
           id: 'sofatracker_alerts',
           name: 'Alertas de Jogadores',
           description: 'Notificações importantes de lances',
-          importance: 5, // MAX (Som + Heads-up na tela)
-          visibility: 1, // Visível na tela de bloqueio
+          importance: 5,
+          visibility: 1,
           vibration: true,
         });
       } catch (e) {
@@ -145,46 +144,20 @@ export default function App() {
     initNativeConfig();
   }, []);
 
-  // 2.1 GERENCIAMENTO DINÂMICO DE ENERGIA
+  // 2.1 GERENCIAMENTO DINÂMICO DE ENERGIA (Limpo e Seguro)
   useEffect(() => {
     const managePowerState = async () => {
       try {
         if (isMonitoring) {
-          await KeepAwake.keepAwake(); // Não deixa a tela apagar no app aberto
+          await KeepAwake.keepAwake(); // Mantém a tela acesa quando em primeiro plano
         } else {
-          await KeepAwake.allowSleep(); // Pode dormir
+          await KeepAwake.allowSleep();
         }
       } catch (e) {
         console.log('KeepAwake error', e);
       }
-
-      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
-        const bgMode = window.cordova.plugins.backgroundMode;
-        
-        if (isMonitoring) {
-          if (!bgMode.isActive()) {
-            bgMode.enable();
-            bgMode.setDefaults({
-              title: '🟢 SofaTracker Ativo',
-              text: 'Monitorizando jogadores...',
-              icon: 'icon', 
-              color: '#10b981', 
-              hidden: false,
-              sticky: true,
-              silent: true
-            });
-            
-            if (typeof bgMode.disableBatteryOptimizations === 'function') {
-              bgMode.disableBatteryOptimizations();
-            }
-
-          }
-        } else {
-          if (bgMode.isActive()) {
-            bgMode.disable();
-          }
-        }
-      }
+      // NOTA: Removemos totalmente o cordova.plugins.backgroundMode daqui!
+      // O Web Worker fará o trabalho de fundo sem irritar o Android.
     };
 
     managePowerState();
@@ -309,6 +282,33 @@ export default function App() {
     }
   };
 
+  // ADIÇÃO AUTOMÁTICA AO CLICAR NA ESTATÍSTICA
+  const toggleTrack = (statKey) => {
+    const newTracked = { ...(trackedStats || {}), [statKey]: !(trackedStats || {})[statKey] };
+    setTrackedStats(newTracked);
+    
+    const isSaved = savedPlayers.some(sp => sp?.player?.id === selectedPlayer?.id);
+
+    if (!isSaved) {
+      // Se não estiver salvo, salva automaticamente
+      setSavedPlayers(prev => [...prev, { 
+        game: selectedGame, 
+        player: selectedPlayer, 
+        stats: playerStats, 
+        tracked: newTracked 
+      }]);
+      addNotification('Automático', `${selectedPlayer?.name} adicionado aos favoritos.`, 'success');
+    } else {
+      // Se já estiver, apenas atualiza as estatísticas rastreadas
+      setSavedPlayers(prev => prev.map(sp => {
+        if (sp?.player?.id === selectedPlayer?.id) {
+          return { ...sp, tracked: newTracked };
+        }
+        return sp;
+      }));
+    }
+  };
+
   const removeSavedPlayer = (playerId, e) => {
     e.stopPropagation();
     setSavedPlayers(prev => prev.filter(sp => sp?.player?.id !== playerId));
@@ -323,7 +323,7 @@ export default function App() {
     setView('tracker');
   };
 
-  // 3. FUNÇÃO DE NOTIFICAÇÃO NATIVA (Com Canal de Som Ativado)
+  // 3. FUNÇÃO DE NOTIFICAÇÃO NATIVA (Limpa de chamadas antigas)
   const addNotification = async (title, message, type = 'info') => {
     const id = Date.now() + Math.random();
     setNotifications(prev => [{ id, title, message, type }, ...prev]);
@@ -339,7 +339,7 @@ export default function App() {
             body: message,
             id: Math.floor(Math.random() * 1000000), 
             schedule: { at: new Date(Date.now() + 1000) },
-            channelId: 'sofatracker_alerts', // <-- OBRIGATÓRIO NO SAMSUNG
+            channelId: 'sofatracker_alerts', 
             sound: null,
             attachments: null,
             actionTypeId: '',
@@ -347,10 +347,6 @@ export default function App() {
           }
         ]
       });
-      
-      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
-         window.cordova.plugins.backgroundMode.wakeUp(); // Tenta forçar a tela a acordar
-      }
     } catch (e) {
       console.warn('Ambiente não suporta notificações nativas:', e);
     }
@@ -441,7 +437,7 @@ export default function App() {
 
     const intervalTime = isDemoModeRef.current ? 5000 : 15000;
     
-    // TRUQUE DO WEB WORKER PARA DRIBLAR A SAMSUNG
+    // TRUQUE DO WEB WORKER PARA DRIBLAR A ECONOMIA DE BATERIA
     const workerCode = `
       let timer = null;
       self.onmessage = function(e) {
@@ -460,7 +456,6 @@ export default function App() {
       pollStats();
     };
 
-    // Inicia o Worker e roda a primeira vez
     worker.postMessage({ command: 'start', interval: intervalTime });
     pollStats();
 
@@ -468,19 +463,7 @@ export default function App() {
       worker.postMessage({ command: 'stop' });
       worker.terminate();
     };
-  }, []); // A ref da dependência não muda, tudo roda seguro com useRef
-
-  const toggleTrack = (statKey) => {
-    const newTracked = { ...(trackedStats || {}), [statKey]: !(trackedStats || {})[statKey] };
-    setTrackedStats(newTracked);
-    
-    setSavedPlayers(prev => prev.map(sp => {
-      if (sp?.player?.id === selectedPlayer?.id) {
-        return { ...sp, tracked: newTracked };
-      }
-      return sp;
-    }));
-  };
+  }, []);
 
   const getRatingColor = (rating) => {
     if (!rating || rating === '-') return 'bg-slate-500';
