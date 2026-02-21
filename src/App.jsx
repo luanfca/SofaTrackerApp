@@ -144,7 +144,7 @@ export default function App() {
     initNativeConfig();
   }, []);
 
-  // 2.1 GERENCIAMENTO DINÂMICO DE ENERGIA (Limpo e Seguro)
+ // 2.1 GERENCIAMENTO DINÂMICO DE ENERGIA (O Retorno Seguro)
   useEffect(() => {
     const managePowerState = async () => {
       try {
@@ -156,8 +156,31 @@ export default function App() {
       } catch (e) {
         console.log('KeepAwake error', e);
       }
-      // NOTA: Removemos totalmente o cordova.plugins.backgroundMode daqui!
-      // O Web Worker fará o trabalho de fundo sem irritar o Android.
+
+      // O MOTOR VOLTA AQUI (Mas sem a função que causava o Crash)
+      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
+        const bgMode = window.cordova.plugins.backgroundMode;
+        
+        if (isMonitoring) {
+          // Liga o serviço de segundo plano (Isso cria aquela notificação fixa no celular)
+          if (!bgMode.isActive()) {
+            bgMode.enable();
+            bgMode.setDefaults({
+              title: '🟢 SofaTracker Ativo',
+              text: 'Buscando estatísticas em tempo real...',
+              icon: 'icon', 
+              color: '#10b981', 
+              hidden: false,
+              sticky: true // Torna a notificação fixa para o Android não matar
+            });
+          }
+        } else {
+          // Se não tem ninguém sendo monitorado, desliga tudo pra poupar bateria
+          if (bgMode.isActive()) {
+            bgMode.disable();
+          }
+        }
+      }
     };
 
     managePowerState();
