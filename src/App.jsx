@@ -178,9 +178,6 @@ export default function App() {
               bgMode.disableBatteryOptimizations();
             }
 
-            bgMode.on('activate', function() {
-               bgMode.disableWebViewOptimizations();
-            });
           }
         } else {
           if (bgMode.isActive()) {
