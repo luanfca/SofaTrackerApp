@@ -98,7 +98,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [isDemoMode, setIsDemoMode] = useState(false);
 
-  // 1. PERSISTÊNCIA DE DADOS (Impede de perder jogadores ao fechar o app)
+  // 1. PERSISTÊNCIA DE DADOS
   const [savedPlayers, setSavedPlayers] = useState(() => {
     try {
       const localData = localStorage.getItem('@sofatracker_saved_players');
@@ -109,7 +109,6 @@ export default function App() {
     }
   });
 
-  // Salva no disco sempre que a lista mudar
   useEffect(() => {
     localStorage.setItem('@sofatracker_saved_players', JSON.stringify(savedPlayers));
   }, [savedPlayers]);
@@ -121,53 +120,80 @@ export default function App() {
   const [playerStats, setPlayerStats] = useState(null);
   const [notifications, setNotifications] = useState([]);
 
-  // 2. CONFIGURAÇÃO NATIVA BLINDADA (Fica Ativo em Background)
+  // VARIÁVEL CHAVE PARA ENERGIA E BACKGROUND
+  const isMonitoring = savedPlayers.length > 0;
+
+  // 2. CONFIGURAÇÃO NATIVA BLINDADA E CANAL DE NOTIFICAÇÃO
   useEffect(() => {
     const initNativeConfig = async () => {
-      // Pede permissão para Notificações Nativas
       try {
         await LocalNotifications.requestPermissions();
-      } catch (e) {
-        console.log('Permissão de notificação falhou ou não suportada.', e);
-      }
-
-      // Mantém a tela ligada se o app estiver aberto em primeiro plano
-      try {
-        await KeepAwake.keepAwake();
-      } catch (e) {
-        console.log('KeepAwake não suportado.', e);
-      }
-
-      // Configuração Extrema de Background Mode
-      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
-        const bgMode = window.cordova.plugins.backgroundMode;
         
-        bgMode.enable();
-        bgMode.setDefaults({
-            title: '🟢 SofaTracker Ativo',
-            text: 'A receber dados do jogo em tempo real...',
-            icon: 'icon', 
-            color: '#10b981', 
-            hidden: false,
-            sticky: true, // Torna a notificação inamovível
-            silent: true
+        // CRIA CANAL DE ALTA PRIORIDADE PARA ANDROID 8+ (ACORDA A TELA)
+        await LocalNotifications.createChannel({
+          id: 'sofatracker_alerts',
+          name: 'Alertas de Jogadores',
+          description: 'Notificações importantes de lances',
+          importance: 5, // MAX (Som + Heads-up na tela)
+          visibility: 1, // Visível na tela de bloqueio
+          vibration: true,
         });
-        
-        // Pede ao utilizador para ignorar a otimização de bateria (Fundamental no Android 12+)
-        if (typeof bgMode.disableBatteryOptimizations === 'function') {
-          bgMode.disableBatteryOptimizations();
-        }
-
-        bgMode.on('activate', function() {
-           bgMode.disableWebViewOptimizations(); // Força o JavaScript (setInterval) a continuar correndo
-        });
+      } catch (e) {
+        console.log('Permissões nativas falharam.', e);
       }
     };
-
     initNativeConfig();
   }, []);
 
-  // Refs de sincronização para o setInterval
+  // 2.1 GERENCIAMENTO DINÂMICO DE ENERGIA
+  useEffect(() => {
+    const managePowerState = async () => {
+      try {
+        if (isMonitoring) {
+          await KeepAwake.keepAwake(); // Não deixa a tela apagar no app aberto
+        } else {
+          await KeepAwake.allowSleep(); // Pode dormir
+        }
+      } catch (e) {
+        console.log('KeepAwake error', e);
+      }
+
+      if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
+        const bgMode = window.cordova.plugins.backgroundMode;
+        
+        if (isMonitoring) {
+          if (!bgMode.isActive()) {
+            bgMode.enable();
+            bgMode.setDefaults({
+              title: '🟢 SofaTracker Ativo',
+              text: 'Monitorizando jogadores...',
+              icon: 'icon', 
+              color: '#10b981', 
+              hidden: false,
+              sticky: true,
+              silent: true
+            });
+            
+            if (typeof bgMode.disableBatteryOptimizations === 'function') {
+              bgMode.disableBatteryOptimizations();
+            }
+
+            bgMode.on('activate', function() {
+               bgMode.disableWebViewOptimizations();
+            });
+          }
+        } else {
+          if (bgMode.isActive()) {
+            bgMode.disable();
+          }
+        }
+      }
+    };
+
+    managePowerState();
+  }, [isMonitoring]);
+
+  // Refs de sincronização
   const viewRef = useRef(view);
   const savedPlayersRef = useRef(savedPlayers);
   const playerStatsRef = useRef(playerStats);
@@ -300,16 +326,14 @@ export default function App() {
     setView('tracker');
   };
 
-  // 3. FUNÇÃO DE NOTIFICAÇÃO NATIVA
+  // 3. FUNÇÃO DE NOTIFICAÇÃO NATIVA (Com Canal de Som Ativado)
   const addNotification = async (title, message, type = 'info') => {
-    // Mostra o balãozinho visual dentro do app
     const id = Date.now() + Math.random();
     setNotifications(prev => [{ id, title, message, type }, ...prev]);
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 5000);
 
-    // Dispara a Notificação Nativa Vibratória do Android
     try {
       await LocalNotifications.schedule({
         notifications: [
@@ -317,7 +341,8 @@ export default function App() {
             title: title,
             body: message,
             id: Math.floor(Math.random() * 1000000), 
-            schedule: { at: new Date(Date.now() + 1000) }, // Atraso de 1s ajuda o sistema a processar em background
+            schedule: { at: new Date(Date.now() + 1000) },
+            channelId: 'sofatracker_alerts', // <-- OBRIGATÓRIO NO SAMSUNG
             sound: null,
             attachments: null,
             actionTypeId: '',
@@ -326,16 +351,15 @@ export default function App() {
         ]
       });
       
-      // Se estiver em background, força a tela a acordar (opcional)
       if (window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode) {
-         window.cordova.plugins.backgroundMode.wakeUp();
+         window.cordova.plugins.backgroundMode.wakeUp(); // Tenta forçar a tela a acordar
       }
     } catch (e) {
       console.warn('Ambiente não suporta notificações nativas:', e);
     }
   };
 
-  // LOOP DE VERIFICAÇÃO DE ESTATÍSTICAS
+  // 4. LOOP BLINDADO COM WEB WORKER
   useEffect(() => {
     const pollStats = async () => {
       const targets = [...savedPlayersRef.current];
@@ -419,10 +443,35 @@ export default function App() {
     };
 
     const intervalTime = isDemoModeRef.current ? 5000 : 15000;
-    const interval = setInterval(pollStats, intervalTime);
+    
+    // TRUQUE DO WEB WORKER PARA DRIBLAR A SAMSUNG
+    const workerCode = `
+      let timer = null;
+      self.onmessage = function(e) {
+        if (e.data.command === 'start') {
+          timer = setInterval(() => { self.postMessage('tick'); }, e.data.interval);
+        } else if (e.data.command === 'stop') {
+          clearInterval(timer);
+        }
+      };
+    `;
+    
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
+
+    worker.onmessage = () => {
+      pollStats();
+    };
+
+    // Inicia o Worker e roda a primeira vez
+    worker.postMessage({ command: 'start', interval: intervalTime });
     pollStats();
-    return () => clearInterval(interval);
-  }, []);
+
+    return () => {
+      worker.postMessage({ command: 'stop' });
+      worker.terminate();
+    };
+  }, []); // A ref da dependência não muda, tudo roda seguro com useRef
 
   const toggleTrack = (statKey) => {
     const newTracked = { ...(trackedStats || {}), [statKey]: !(trackedStats || {})[statKey] };
@@ -555,7 +604,7 @@ export default function App() {
           <div className="flex items-center justify-end shrink-0 gap-1 sm:gap-2">
             
             <button 
-              onClick={() => addNotification('Teste Recebido! 🛡️', 'A notificação nativa está a funcionar em segundo plano.', 'success')}
+              onClick={() => addNotification('Teste Recebido! 🛡️', 'A notificação nativa está a funcionar.', 'success')}
               className="flex text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 px-3 py-1.5 rounded-full border border-emerald-500/30 items-center gap-1.5 transition-colors font-bold shadow-[0_0_10px_rgba(16,185,129,0.2)]"
               title="Testar Notificação Nativa no Celular"
             >
@@ -787,20 +836,20 @@ export default function App() {
 
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
                {[
-                  { key: 'tackles', label: 'Desarmes' },
-                  { key: 'fouls', label: 'Faltas' },
-                  { key: 'foulsDrawn', label: 'Sofridas' },
-                  { key: 'shotsTotal', label: 'Remates' },
-                  { key: 'shotsOnTarget', label: 'No Alvo' },
-                ].map((stat) => (
-                  <div key={stat.key} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col items-center justify-center text-center">
-                    <span className="text-slate-400 text-xs uppercase tracking-wider mb-2">{stat.label}</span>
-                    <span className="text-3xl font-bold text-white">
-                      {playerStats?.[stat.key] !== undefined ? playerStats[stat.key] : '-'}
-                    </span>
-                    <div className={`mt-2 w-2 h-2 rounded-full ${trackedStats?.[stat.key] ? 'bg-emerald-500 shadow-[0_0_8px_#10b981] animate-pulse' : 'bg-slate-800'}`}></div>
-                  </div>
-                ))}
+                 { key: 'tackles', label: 'Desarmes' },
+                 { key: 'fouls', label: 'Faltas' },
+                 { key: 'foulsDrawn', label: 'Sofridas' },
+                 { key: 'shotsTotal', label: 'Remates' },
+                 { key: 'shotsOnTarget', label: 'No Alvo' },
+               ].map((stat) => (
+                 <div key={stat.key} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col items-center justify-center text-center">
+                   <span className="text-slate-400 text-xs uppercase tracking-wider mb-2">{stat.label}</span>
+                   <span className="text-3xl font-bold text-white">
+                     {playerStats?.[stat.key] !== undefined ? playerStats[stat.key] : '-'}
+                   </span>
+                   <div className={`mt-2 w-2 h-2 rounded-full ${trackedStats?.[stat.key] ? 'bg-emerald-500 shadow-[0_0_8px_#10b981] animate-pulse' : 'bg-slate-800'}`}></div>
+                 </div>
+               ))}
             </div>
           </div>
         )}
